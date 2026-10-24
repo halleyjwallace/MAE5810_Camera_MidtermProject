@@ -1,0 +1,298 @@
+% MAE 5810 Robot Perception Midterm Project
+% Author: Halley Wallace
+% Compile with pdfLaTeX (Overleaf -> Menu -> Compiler -> pdfLaTeX).
+% Figure placeholders automatically show when optional screenshots have not yet been uploaded.
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,graphicx,booktabs,array,xcolor}
+\usepackage{setspace}
+\usepackage{caption}
+\usepackage{microtype}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+\usepackage{float}
+\usepackage{enumitem}
+\onehalfspacing
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.07em}
+\setlength{\abovedisplayskip}{5pt plus 1pt minus 1pt}
+\setlength{\belowdisplayskip}{5pt plus 1pt minus 1pt}
+\setlength{\abovedisplayshortskip}{3pt}
+\setlength{\belowdisplayshortskip}{3pt}
+\setlength{\textfloatsep}{9pt plus 2pt minus 2pt}
+\setlength{\intextsep}{8pt plus 2pt minus 2pt}
+\setlength{\floatsep}{7pt plus 2pt minus 2pt}
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+\setlist{noitemsep,topsep=3pt}
+% Quiet syntax highlighting used only in code listings; body text remains black.
+\definecolor{codeblue}{RGB}{24,83,132}
+\definecolor{codesage}{RGB}{75,114,91}
+\definecolor{codeorange}{RGB}{157,79,52}
+\definecolor{codegray}{RGB}{110,110,110}
+\definecolor{codeback}{RGB}{250,250,250}
+\lstset{language=Python,basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{codeblue}\bfseries,
+  commentstyle=\color{codesage}\itshape,
+  stringstyle=\color{codeorange},
+  numbers=none,breaklines=true,columns=fullflexible,
+  backgroundcolor=\color{codeback},frame=single,rulecolor=\color{codegray!45},
+  framesep=4pt,showstringspaces=false,aboveskip=4pt,belowskip=3pt,
+  captionpos=b}
+% Show actual comparison screenshot with no placeholder or filename fallback.
+% Images are included in the figures/ folder of this project.
+\newcommand{\compareimage}[2]{%
+  \includegraphics[width=\linewidth,height=1.22in,keepaspectratio]{figures/#1}%
+}
+\newcommand{\optionalfigure}[2]{%
+  \IfFileExists{figures/#1}{\includegraphics[width=\linewidth]{figures/#1}}{%
+  \fbox{\parbox[c][1.17in][c]{0.94\linewidth}{\centering\small #2\\[3pt]\textit{Upload} \texttt{\detokenize{figures/#1}} \textit{to replace this placeholder.}}}%
+  }%
+}
+\begin{document}
+\begin{titlepage}
+\centering
+\vspace*{1.45in}
+{\Large\bfseries MODELING AND SIMULATION OF A PINHOLE RGB CAMERA SENSOR\\[5pt]
+ON A KUKA ROBOTIC ARM IN PYBULLET\par}
+\vspace{0.42in}
+{\normalsize MAE 5810 --- Robot Perception $\vert$ Midterm Project\par}
+\vspace{0.72in}
+{\normalsize Halley Wallace\par}
+\vspace{0.20in}
+{\normalsize Cornell University\par}
+\vspace{0.20in}
+{\normalsize October 2026\par}
+\end{titlepage}
+
+\section*{Abstract}
+I modeled a virtual RGB pinhole camera mounted on a KUKA iiwa robotic arm in PyBullet to investigate how image measurements depend on camera pose, field of view (FOV), target dimensions, and occlusion. I transformed the cube's known 3D position into the camera reference frame and predicted its image location using perspective projection. I used OpenCV color segmentation to locate the cube independently in rendered RGB images. For the 90$^\circ$ baseline, the predicted pixel center was $(380,280)$ and the detected bounding-box center was $(382.5,281.5)$, a difference of $2.91$ pixels. Rotating the camera by $20^\circ$ gave predicted and observed horizontal shifts of $102.11$ and $104.5$ pixels. Larger cube sizes increased the detected image width, whereas an opaque obstacle prevented detection despite the target center remaining within the geometric FOV. These results support the model's predicted geometric dependencies in a simulated environment.
+
+\section{Introduction}
+Robot-mounted cameras measure a 3D environment through a 2D image, so the measured pixel location of an object depends on camera position, orientation, focal length, and whether the object is visible. A mathematical projection model is useful for predicting these changes before processing images.
+
+I implemented a virtual RGB camera attached to the end effector of a seven-joint KUKA iiwa robot in PyBullet. I used the pinhole geometry introduced in the course handout~\cite{ferrari}, generated images of a stationary red cube, and compared projected pixel locations with locations detected from the images using OpenCV. I varied camera translation, camera tilt, FOV, cube size, and obstacle visibility. The following sections derive the 3D-to-2D measurement equations, describe how I implemented them, and use my experimental data to test the predicted dependencies.
+
+\section{Mathematical Camera Model}
+\subsection{Camera pose and coordinate transformation}
+The lecture defines camera-fixed axes with $z$ along the optical axis, then expresses a world vector in that frame using successive Euler rotations~\cite[Eq.~(2)]{ferrari}. I used the same idea with the \emph{actual} orientation of the KUKA end effector instead of a separate pan--tilt mechanism. First, PyBullet solves inverse kinematics for a desired end-effector pose; the achieved world-frame position is $\mathbf{x}_E$ and the orientation matrix is $R_{WE}$ (end-effector to world).
+
+My camera is displaced from the end effector by a mounting vector $\mathbf{o}_E=[0,\,0.10,\,0.10]^T$ m in the \emph{local} end-effector frame. A local displacement must first be rotated into world axes before it is added to the end-effector position:
+\begin{equation}
+\boxed{\mathbf{x}_C=\mathbf{x}_E+R_{WE}\mathbf{o}_E.}\label{eq:campos}
+\end{equation}
+I additionally introduced a tilt $\alpha$ about the camera's local $y$ axis. The corresponding active rotation is
+\begin{equation}
+R_y(\alpha)=\begin{bmatrix}\cos\alpha&0&\sin\alpha\\0&1&0\\-\sin\alpha&0&\cos\alpha\end{bmatrix},\qquad
+\boxed{R_{WC}=R_{WE}R_y(\alpha).}\label{eq:camrot}
+\end{equation}
+The camera is tilted about its own center, so this additional rotation changes its pointing direction but not $\mathbf{x}_C$. This is useful for isolating orientation effects from translation effects.
+
+To derive the camera-fixed target coordinates, start with the target's world position $\mathbf{x}_T$ and subtract the camera center. The displacement $\mathbf{x}_T-\mathbf{x}_C$ is still expressed in \emph{world} axes. Since $R_{WC}$ maps camera axes into world axes, its inverse maps world axes back into camera axes. An orthogonal rotation matrix satisfies $R_{WC}^{-1}=R_{WC}^{T}$, giving
+\begin{equation}
+\boxed{\mathbf{q}_C=R_{WC}^{T}(\mathbf{x}_T-\mathbf{x}_C)
+=\begin{bmatrix}q_x&q_y&q_z\end{bmatrix}^{T}.}\label{eq:camera_coords}
+\end{equation}
+Here $q_x$ and $q_y$ locate the point laterally relative to the optical axis, while $q_z$ is its \emph{depth along the optical axis}. This extends the camera-fixed transformation in the lecture~\cite[Eq.~(4)]{ferrari} to a 3D cube on a moving robot arm.
+
+\begin{lstlisting}[caption={Camera mounting and world-to-camera coordinates.},label={lst:frames}]
+camera_position = ee_position + rotation_matrix @ np.array(camera_offset)
+camera_rotation = rotation_matrix @ tilt_rotation
+target_camera = camera_rotation.T @ (target_world - camera_position)
+\end{lstlisting}
+
+\subsection{Pinhole projection and focal length}
+In the lecture's virtual pinhole plane, similar triangles give a proportionality between an object's lateral offset and its image-plane offset. If a point is at camera coordinates $(q_x,q_y,q_z)$ and the image plane is a focal distance $\lambda$ from the pinhole, then
+\begin{equation}
+\frac{p_x}{\lambda}=\frac{q_x}{q_z},\qquad
+\frac{p_y}{\lambda}=\frac{q_y}{q_z}\quad\Longrightarrow\quad
+\boxed{\mathbf{p}=\lambda\begin{bmatrix}q_x/q_z\\q_y/q_z\end{bmatrix}.}\label{eq:lecture_proj}
+\end{equation}
+This reproduces the course model~\cite[Eq.~(3)]{ferrari}. Perspective division by $q_z$ means the same lateral offset projects closer to the image center when the target is farther away. The equation is valid for targets in front of the camera ($q_z>0$).
+
+My rendered camera has a $W\times H=640\times480$ pixel image. Rather than specifying a physical $\lambda$, I convert the \emph{vertical} FOV $\theta$ to focal length $f$ in pixels. In the right triangle formed by the optical axis and the image's top edge,
+\begin{equation}
+\tan\!\left(\frac{\theta}{2}\right)=\frac{H/2}{f}
+\quad\Longrightarrow\quad
+\boxed{f=\frac{H}{2\tan(\theta/2)}.}\label{eq:focal}
+\end{equation}
+A point on the optical axis maps to the principal point $(c_x,c_y)=(W/2,H/2)=(320,240)$ px. The pixel horizontal coordinate $u$ increases \emph{to the right}, and the vertical coordinate $v$ increases \emph{downward}. Because the local $+x$ and $+y$ camera axes in my PyBullet configuration point opposite these image directions, the pixel equations are
+\begin{equation}
+\boxed{\hat u=c_x-f\frac{q_x}{q_z},\qquad
+       \hat v=c_y-f\frac{q_y}{q_z}.}\label{eq:pinhole}
+\end{equation}
+Thus $\hat u$ is the predicted \textbf{horizontal pixel position} (image column), and $\hat v$ is the predicted \textbf{vertical pixel position} (image row). The signs depend on the chosen camera/image coordinate convention; they do not change the perspective model.
+
+At $\theta=90^\circ$, the focal length is $f=240$ px. For the baseline camera-frame target position $\mathbf{q}_C\approx[-0.150,-0.100,0.600]^T$ m, Eq.~\eqref{eq:pinhole} gives
+\begin{align}
+\hat u&=320-240(-0.150/0.600)=380\ \mathrm{px},\nonumber\\
+\hat v&=240-240(-0.100/0.600)=280\ \mathrm{px}.\label{eq:baseline}
+\end{align}
+\begin{lstlisting}[caption={FOV-to-focal-length conversion and image projection.},label={lst:projection}]
+focal_length = (image_height / 2) / np.tan(np.radians(fov) / 2)
+u_predicted = cx - focal_length * (qx / qz)  # horizontal pixel
+v_predicted = cy - focal_length * (qy / qz)  # vertical pixel
+\end{lstlisting}
+
+\subsection{Field of view and visibility}
+The target center is geometrically in the image when its projection lies within the sensor rectangle, as in the lecture FOV constraint~\cite[Eq.~(8)]{ferrari}:
+\begin{equation}
+q_z>0,\qquad 0\le\hat u<W,\qquad 0\le\hat v<H.\label{eq:fov}
+\end{equation}
+This is a \emph{center-only} test, and the renderer also enforces near/far clipping. It is not a line-of-sight test: an opaque object may hide a cube even when its projected center is inside the FOV. My simulation checks practical visibility from the rendered RGB image rather than with an explicit analytical ray test.
+
+\subsection{Graduate-level measurement dependencies}
+Differentiating the horizontal projection with respect to camera-frame position and focal length gives
+\begin{equation}
+\frac{\partial\hat u}{\partial q_x}=-\frac{f}{q_z},\qquad
+\frac{\partial\hat u}{\partial q_z}=\frac{fq_x}{q_z^2},\qquad
+\frac{\partial\hat u}{\partial f}=-\frac{q_x}{q_z}.\label{eq:partialsx}
+\end{equation}
+The analogous vertical derivatives replace $u,q_x$ with $v,q_y$. Therefore lateral displacement causes linear pixel displacement at constant depth; its magnitude scales as $1/q_z$; and narrower FOV increases $f$ and image displacement from the principal point.
+
+For a camera tilt $\alpha$ about local $y$, applying $R_y(\alpha)^T$ to a fixed target gives
+\begin{equation}
+q_x(\alpha)=q_{x0}\cos\alpha-q_{z0}\sin\alpha,\quad
+q_z(\alpha)=q_{x0}\sin\alpha+q_{z0}\cos\alpha.\label{eq:tiltcoords}
+\end{equation}
+Substitution into Eq.~\eqref{eq:pinhole} and differentiation yields
+\begin{equation}
+\frac{d\hat u}{d\alpha}=f\!\left[1+\left(\frac{q_x}{q_z}\right)^2\right]>0,\quad q_z>0.\label{eq:tiltsens}
+\end{equation}
+This predicts the observed increasing horizontal pixel coordinate as the camera tilts. Finally, a small planar target of physical width $L$ at approximately uniform depth projects to
+\begin{equation}
+w_{\mathrm{px}}\approx\frac{fL}{q_z}.\label{eq:size}
+\end{equation}
+A 3D cube has visible faces at different depths, so this is an approximation to its detected bounding-box width.
+
+
+\section{Simulation Procedure}
+\subsection{Robot and camera configuration}
+I loaded a fixed-base seven-joint KUKA iiwa robot, set the desired end-effector pose to $[0.45,0,0.75]^T$ m with its local optical direction downward, and applied PyBullet inverse kinematics to compute joint angles. Comparing actual with commanded end-effector position gave a baseline error of $0.00886$ mm. I mounted the camera with offset $\mathbf{o}_E$, positioned the red cube at $[0.60,0,0.05]^T$ m, and rendered a $640\times480$ image with a $90^\circ$ baseline FOV, $0.01$ m near plane, and $10$ m far plane. I used the achieved robot pose in both the mathematical projection and the PyBullet view matrix.
+
+\subsection{OpenCV image measurement and error calculation}
+I used PyBullet's \texttt{getCameraImage} to generate RGB pixels, then extracted the observed target center using OpenCV. Unlike the pinhole equations, this measurement is obtained from \emph{image intensities} rather than known 3D target coordinates.
+
+\textbf{Step 1: Color segmentation.} Each RGB pixel $I(u,v)$ is converted to HSV values $(h,s,b)$. Because red wraps around the HSV hue scale, I retained pixels satisfying either red interval while also requiring sufficient saturation and brightness:
+\begin{equation}
+M(u,v)=\begin{cases}
+1,& [h\in[0,10]\ \mathrm{or}\ h\in[170,179]]\ \mathrm{and}\ s\ge100,\ b\ge100,\\
+0,&\text{otherwise.}
+\end{cases}\label{eq:mask}
+\end{equation}
+This binary mask is computed using \texttt{cv2.inRange} for each interval and a logical OR to combine them.
+
+\textbf{Step 2: Target localization.} I find external contours of $M$, select the largest qualifying red region (contour area $>20$ pixels$^2$), and form its axis-aligned bounding rectangle with top-left pixel $(x,y)$, width $w$, and height $h_b$. Its center is
+\begin{equation}
+\boxed{u_{\mathrm{obs}}=x+\frac{w}{2},\qquad
+v_{\mathrm{obs}}=y+\frac{h_b}{2}.}\label{eq:opencv}
+\end{equation}
+\textbf{Step 3: Model comparison.} I subtract the predicted pixel vector $(\hat u,\hat v)$ from the observed center and calculate Euclidean displacement:
+\begin{equation}
+\boxed{e_{\mathrm{px}}=\sqrt{(u_{\mathrm{obs}}-\hat u)^2+
+(v_{\mathrm{obs}}-\hat v)^2}.}\label{eq:error}
+\end{equation}
+In the baseline, the bounding box $(x,y,w,h_b)=(357,258,51,47)$ gives $(382.5,281.5)$ px. Subtracting prediction $(380,280)$ yields $e_{\mathrm{px}}=\sqrt{2.5^2+1.5^2}=2.91$ px. The two points need not coincide exactly: one projects the \emph{3D geometric cube center}, while the other locates the center of the \emph{visible 2D red bounding box}.
+\begin{lstlisting}[caption={HSV mask, contour detection, and image measurement.},label={lst:opencv}]
+hsv_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2HSV)
+red_mask = cv2.inRange(hsv_image, lower_red1, upper_red1) | \
+           cv2.inRange(hsv_image, lower_red2, upper_red2)
+contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL,
+                               cv2.CHAIN_APPROX_SIMPLE)
+x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+u, v = x + w / 2, y + h / 2
+pixel_error = np.sqrt((u-u_predicted)**2 + (v-v_predicted)**2)
+\end{lstlisting}
+
+\subsection{Controlled experiments}
+I varied camera translation, vertical FOV ($50^\circ$, $90^\circ$, $110^\circ$), camera tilt ($0^\circ$, $10^\circ$, $20^\circ$), physical cube edge length (4, 7, 10 cm), and obstruction of the LOS. I recorded predicted and observed pixel centers, bounding-box sizes, and detection status. The script overwrites fixed image filenames, so screenshots from each condition were saved separately before changing parameters.
+
+
+\section{Results and Discussion}
+\subsection{Baseline projection and camera translation}
+Under the 90\textdegree{} baseline configuration, Eq.~\eqref{eq:baseline} predicted $(380,280)$ pixels, compared with the OpenCV bounding-box center $(382.5,281.5)$ pixels. Equation~\eqref{eq:error} gives an error of $2.91$ pixels. This small discrepancy indicates agreement at the scale of the $640\times480$ image, subject to the difference between the two center definitions.
+
+An earlier translation experiment held the target depth near $0.50$ m and moved the camera horizontally by approximately $0.10$ m. The predicted horizontal coordinate moved from $392$ to $344$ pixels; the corresponding OpenCV positions moved from $395.5$ to $347.5$ pixels (Table~\ref{tab:translation}). The predicted and observed displacements both had magnitude $48$ pixels. From Eq.~\eqref{eq:partialsx}, the lateral sensitivity magnitude is $f/q_z=240/0.50=480$ px/m, so a relative lateral change of $0.10$ m predicts $48$ pixels. This directly supports the camera-position dependency of the model.
+
+\begin{table}[htbp]
+\centering\small
+\caption{Camera translation experiment at approximately constant target depth.}\label{tab:translation}
+\begin{tabular}{@{}cccc@{}}\toprule
+Camera world $x$ (m) & Predicted $(u,v)$ (px) & Observed $(u,v)$ (px) & Error (px)\\\midrule
+$0.45$ & $(392.0,288.0)$ & $(395.5,290.5)$ & $4.30$\\
+$0.55$ & $(344.0,288.0)$ & $(347.5,290.5)$ & $4.30$\\\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Effect of camera field of view}
+With the cube and camera pose fixed, changing the vertical FOV changed the focal length according to Eq.~\eqref{eq:focal}. Table~\ref{tab:fov} shows that narrower FOV produced larger pixel offsets from the image center and a larger detected cube image. For example, the bounding-box width decreased from $108$ pixels at $50^\circ$ FOV to $36$ pixels at $110^\circ$ FOV. This is consistent with the inverse dependence of focal length on $\tan(\theta/2)$, and confirms that FOV affects both measured location relative to the principal point and apparent object scale.
+
+\begin{table}[htbp]
+\centering\small
+\caption{FOV experiment at fixed camera and target pose.}\label{tab:fov}
+\begin{tabular}{@{}ccccc@{}}\toprule
+FOV & Predicted $(u,v)$ & Observed $(u,v)$ & Box $w\times h$ & Error\\
+$(^\circ)$ & (px) & (px) & (px) & (px)\\\midrule
+$50$ & $(448.68,325.78)$ & $(454.0,329.5)$ & $108\times101$ & $6.49$\\
+$90$ & $(380.00,280.00)$ & $(382.5,281.5)$ & $51\times47$ & $2.91$\\
+$110$ & $(362.01,268.01)$ & $(364.0,268.5)$ & $36\times33$ & $2.05$\\\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Effect of camera orientation}
+I varied the additional camera tilt from $0^\circ$ to $20^\circ$ while keeping the camera center and cube position unchanged. The model predicted horizontal positions of $380.00$, $427.04$, and $482.11$ pixels; OpenCV measured $382.5$, $430.5$, and $487.0$ pixels. Figure~\ref{fig:tilt} plots both trends. Across the full tilt range, the model predicted $102.11$ pixels of horizontal displacement compared with an observed $104.5$ pixels, a difference of $2.39$ pixels in displacement. Equations~\eqref{eq:tiltcoords}--\eqref{eq:tiltsens} explain the positive and nonlinear trend using camera rotation and perspective division.
+
+\begin{figure}[htbp]
+\centering\includegraphics[width=0.61\linewidth]{figures/camera_tilt.pdf}
+\caption{Predicted and OpenCV-measured horizontal position $u$ versus camera tilt.}\label{fig:tilt}
+\end{figure}
+\begin{figure}[htbp]
+\centering
+\begin{minipage}[t]{0.48\linewidth}\centering
+\compareimage{\detokenize{CamTilt0&10cm.png}}{Tilt: $0^\circ$}\\[-2pt]{\small (a) $0^\circ$ camera tilt}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\linewidth}\centering
+\compareimage{CamTilt20.png}{Tilt: $20^\circ$}\\[-2pt]{\small (b) $20^\circ$ camera tilt}
+\end{minipage}
+\caption{Camera tilt comparison: left, $0^\circ$; right, $20^\circ$. The cube and camera center remain fixed.}\label{fig:tiltimages}
+\end{figure}
+
+\subsection{Effect of target size}
+I varied cube edge length between $4$, $7$, and $10$ cm while preserving its world-frame center and the baseline camera pose. OpenCV measured bounding-box widths of $20$, $35$, and $51$ pixels, respectively (Fig.~\ref{fig:cubeimages} compares the endpoints). The physical-size ratio between the largest and smallest cubes is $10/4=2.50$, whereas the observed image-width ratio is $51/20=2.55$. This close agreement is consistent with the approximate linear scaling in Eq.~\eqref{eq:size}. The 3D geometry of the cube and image segmentation explain why a perfectly proportional relationship is not expected. Since the cube center was held at a world $z$ coordinate of $0.05$ m, the smaller cubes were elevated above the ground plane; this should be considered when interpreting the geometry of the images.
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}[t]{0.48\linewidth}\centering
+\compareimage{Cube4cm.png}{Cube width: 4 cm}\\[-2pt]{\small (a) 4-cm cube}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\linewidth}\centering
+\compareimage{\detokenize{CamTilt0&10cm.png}}{Cube width: 10 cm}\\[-2pt]{\small (b) 10-cm cube}
+\end{minipage}
+\caption{Target-size comparison: left, 4-cm cube; right, 10-cm cube, with camera pose and cube center unchanged.}\label{fig:cubeimages}
+\end{figure}
+
+\subsection{Occlusion and measurement availability}
+I placed a gray obstacle between the camera and stationary cube. The geometric center check still returned \texttt{True}, but OpenCV did not detect a red region when the cube was hidden. With the obstacle disabled, the baseline target reappeared and was detected at $(382.5,281.5)$ pixels. This illustrates why the FOV condition in Eq.~\eqref{eq:fov} is necessary for a center measurement but is not sufficient to guarantee actual image visibility. It also demonstrates a dependence on an environmental condition rather than only on camera and target states.
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}[t]{0.48\linewidth}\centering
+\compareimage{LOS_False.png}{LOS: clear}\\[-2pt]{\small (a) Obstacle OFF: detected}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\linewidth}\centering
+\compareimage{LOS_True.png}{LOS: blocked}\\[-2pt]{\small (b) Obstacle ON: not detected}
+\end{minipage}
+\caption{LOS comparison: left, unobstructed (detected); right, blocked (not detected). The center projects within the FOV in both cases.}\label{fig:occlusion}
+\end{figure}
+
+\subsection{Limitations and interpretation}
+The agreement between predicted and detected coordinates validates the implemented geometric projection against images generated by the \emph{same simulated camera configuration}; it is not a physical-camera calibration experiment. PyBullet renders a finite 3D cube, while Eq.~\eqref{eq:pinhole} projects a single point. As a result, the OpenCV bounding-box center need not coincide exactly with the projected cube center. Finite rasterization, contour thresholds, and visible-face perspective can also shift a detected bounding box. I used a known camera pose and a high-contrast target, without modeling image noise or lens distortion, so the conclusions apply to this controlled geometric simulation rather than a calibrated physical camera.
+
+\section{Conclusions}
+I implemented a pinhole RGB camera on a KUKA end effector and verified the predicted dependence of image position and scale on camera translation, tilt, FOV, and target size. The baseline projected center differed from the OpenCV-derived bounding-box center by $2.91$ px; the tilt experiment also showed close agreement in displacement. The obstacle experiment demonstrated that FOV membership does not ensure visibility. These tests support the geometric model within PyBullet, while future work could model sensor noise and explicitly compute LOS.
+
+\begin{thebibliography}{9}
+\bibitem{ferrari} S. Ferrari, \emph{Pinhole Camera Model and Field-of-view (FOV)}, MAE 4810/5810 Robot Perception, Cornell University, course handout, n.d.
+\bibitem{bradski} G. Bradski, ``The OpenCV Library,'' \emph{Dr. Dobb's Journal of Software Tools}, 2000.
+\bibitem{coumans} E. Coumans and Y. Bai, ``PyBullet, a Python module for physics simulation for games, robotics and machine learning,'' software documentation, 2016.
+\end{thebibliography}
+\end{document}
